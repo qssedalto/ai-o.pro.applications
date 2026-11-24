@@ -72,7 +72,8 @@ struct Snapshot: Codable, Identifiable {
         defer { busy = false }
         do {
             guard let connection = try await api.call(.connect) as? [String: Any] else { throw MallError.invalidResponse }
-            let catalog = try await Product.catalog(api.call(.items))
+            let catalogData = try await api.call(.items)
+            let catalog = try Product.catalog(catalogData)
             shop = stringValue(connection["shopName"]) ?? "已连接"
             balance = stringValue(connection["balance"]) ?? "—"
             products = catalog
@@ -107,11 +108,20 @@ struct Snapshot: Codable, Identifiable {
 
 struct SafeHTML: NSViewRepresentable {
     let html: String
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            let url = navigationAction.request.url
+            decisionHandler(url?.scheme == "about" ? .allow : .cancel)
+        }
+    }
+    func makeCoordinator() -> Coordinator { Coordinator() }
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = false
         configuration.websiteDataStore = .nonPersistent()
-        return WKWebView(frame: .zero, configuration: configuration)
+        let view = WKWebView(frame: .zero, configuration: configuration)
+        view.navigationDelegate = context.coordinator
+        return view
     }
     func updateNSView(_ view: WKWebView, context: Context) {
         let header = "<meta http-equiv='Content-Security-Policy' content=\"default-src 'none'; style-src 'unsafe-inline'\"><meta charset='utf-8'><style>body{font:14px -apple-system;overflow-wrap:anywhere}table{max-width:100%}</style>"
@@ -142,9 +152,9 @@ struct ProductDetail: View {
                 if !options.isEmpty {
                     Picker("类别规格", selection: $race) {
                         ForEach(options) { Text($0.race + " · ¥" + $0.price).tag($0.race) }
-                    }
+                    }.disabled(busy)
                 }
-                Stepper("数量：\(quantity)", value: $quantity, in: 1...1000)
+                Stepper("数量：\(quantity)", value: $quantity, in: 1...1000).disabled(busy)
                 HStack {
                     Button("查询报价与库存") { Task { await lookup() } }.disabled(busy || detail.isEmpty)
                     Button("库存可用性校验") { Task { await validate() } }.disabled(busy || detail.isEmpty)
@@ -211,10 +221,12 @@ struct ProductDetail: View {
         do {
             var f = fields(); f["num"] = String(count); f["card_id"] = "0"
             let q = try await store.api.call(.valuation, f) as? [String: Any]
-            let s = try await store.api.call(.stock, fields()) as? [String: Any]
+            let s = try await store.api.call(.stock, ["code": product.id, "race": selected]) as? [String: Any]
+            let inventory = try await store.api.call(.inventory, ["sharedCode": product.id, "race": selected]) as? [String: Any]
             guard let p = decimalValue(q?["price"]), let n = Int(stringValue(s?["stock"]) ?? "") else { throw MallError.invalidResponse }
             guard selected == race, count == quantity else { return }
             quote = p; stock = n
+            if let inventoryCount = stringValue(inventory?["count"]), inventoryCount != String(n) { status = "库存查询结果存在差异，请刷新确认。" }
             store.record(Snapshot(time: Date(), code: product.id, race: selected, quantity: count, price: p, stock: n))
         } catch { self.error = error.localizedDescription }
     }
@@ -280,7 +292,7 @@ struct HistoryView: View {
 
 struct Root: View {
     @EnvironmentObject var store: Store
-    @State private var tab = "catalog"
+    @State private var tab: String? = "catalog"
     @State private var search = ""
     @State private var selected: Product?
     var filtered: [Product] {
@@ -327,7 +339,7 @@ struct Root: View {
     }
 }
 
-@main struct AIOStudioApp: App {
+@main @MainActor struct AIOStudioApp: App {
     @StateObject private var store = Store()
     var body: some Scene {
         WindowGroup("AI-O Studio") { Root().environmentObject(store) }

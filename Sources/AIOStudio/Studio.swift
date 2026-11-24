@@ -4,6 +4,7 @@ import AppKit
 import Charts
 import WebKit
 import MallCore
+import UserNotifications
 
 enum Vault {
     static let service = "pro.ai-o.studio"
@@ -50,13 +51,69 @@ struct Snapshot: Codable, Identifiable {
     @Published var updated: Date?
     @Published var history: [Snapshot] = []
     @Published var merchant = Vault.load("id")
+    @Published private(set) var inventoryChanges: [String] = []
+    @Published private(set) var noticePermission = "未授权"
+    @Published var refreshMinutes: Int = UserDefaults.standard.integer(forKey: "refreshMinutes") { didSet { UserDefaults.standard.set(refreshMinutes, forKey: "refreshMinutes"); scheduleRefresh() } }
+    @Published var noticesEnabled: Bool = UserDefaults.standard.bool(forKey: "noticesEnabled") { didSet { UserDefaults.standard.set(noticesEnabled, forKey: "noticesEnabled") } }
+    private var refreshTask: Task<Void, Never>?
+    private var generation = UUID()
     private var key = Vault.load("key")
     private var storage: URL? {
         guard let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
         guard !merchant.isEmpty, merchant.utf8.allSatisfy({ (48...57).contains($0) }) else { return nil }
         return base.appendingPathComponent("AI-O Studio/Accounts/" + merchant + "/history.json")
     }
-    init() { loadHistory() }
+    init() {
+        loadHistory()
+        scheduleRefresh()
+        Task { await updateNoticePermission() }
+    }
+    func scheduleRefresh() {
+        refreshTask?.cancel()
+        guard [5, 15, 30, 60].contains(refreshMinutes) else { return }
+        let seconds = UInt64(refreshMinutes) * 60 * 1_000_000_000
+        refreshTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(nanoseconds: seconds) } catch { return }
+                guard let self, !self.merchant.isEmpty else { continue }
+                await self.refresh()
+            }
+        }
+    }
+    func updateNoticePermission() async {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        switch settings.authorizationStatus {
+        case .authorized, .provisional: noticePermission = "已授权"
+        case .denied: noticePermission = "系统已拒绝"
+        default: noticePermission = "未授权"
+        }
+    }
+    func requestNotices() async {
+        do {
+            noticesEnabled = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
+            await updateNoticePermission()
+        } catch { noticesEnabled = false; self.error = error.localizedDescription }
+    }
+    private func compareInventory(old: [Product], new: [Product]) async {
+        let previous = Dictionary(uniqueKeysWithValues: old.map { ($0.id, $0) })
+        let changes = new.compactMap { product -> String? in
+            guard let before = previous[product.id], let a = Int(before.stock), let b = Int(product.stock),
+                  a >= 0, b >= 0, a < 1_000_000, b < 1_000_000 else { return nil }
+            if a > 0 && b == 0 { return product.name + "：目录库存降为 0" }
+            if a == 0 && b > 0 { return product.name + "：目录恢复有货" }
+            if a > 10 && b > 0 && b <= 10 { return product.name + "：目录库存降至 " + String(b) }
+            return nil
+        }
+        inventoryChanges = Array((changes + inventoryChanges).prefix(20))
+        guard noticesEnabled, !changes.isEmpty else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "AI-O Studio · 库存变化"
+        content.body = changes.count == 1 ? changes[0] : "有 " + String(changes.count) + " 项目录库存状态变化，打开应用查看。"
+        content.sound = .default
+        do {
+            try await UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+        } catch { await updateNoticePermission() }
+    }
     private func loadHistory() {
         history = []
         if let url = storage, let data = try? Data(contentsOf: url), let saved = try? JSONDecoder().decode([Snapshot].self, from: data) { history = saved }
@@ -66,23 +123,29 @@ struct Snapshot: Codable, Identifiable {
         guard !id.isEmpty, id.utf8.allSatisfy({ (48...57).contains($0) }), !secret.isEmpty else { throw MallError.invalidCredentials }
         try Vault.save("id", id)
         try Vault.save("key", secret)
+        generation = UUID()
         merchant = id; key = secret
+        inventoryChanges = []
         products = []; balance = "—"; shop = "未连接"; updated = nil; error = ""
         loadHistory()
     }
     func refresh() async {
         guard !busy else { return }
         busy = true; error = ""
+        let client = api, accountGeneration = generation
         defer { busy = false }
         do {
-            guard let connection = try await api.call(.connect) as? [String: Any] else { throw MallError.invalidResponse }
-            let catalogData = try await api.call(.items)
+            guard let connection = try await client.call(.connect) as? [String: Any] else { throw MallError.invalidResponse }
+            let catalogData = try await client.call(.items)
             let catalog = try Product.catalog(catalogData)
+            guard !Task.isCancelled, generation == accountGeneration else { return }
+            let old = products
             shop = stringValue(connection["shopName"]) ?? "已连接"
             balance = stringValue(connection["balance"]) ?? "—"
             products = catalog
             updated = Date()
-        } catch { self.error = error.localizedDescription }
+            await compareInventory(old: old, new: catalog)
+        } catch { if !Task.isCancelled { self.error = error.localizedDescription } }
     }
     func record(_ sample: Snapshot, merchantID: String) {
         guard merchant == merchantID else { return }
@@ -312,6 +375,16 @@ struct SettingsView: View {
             if store.updated != nil { Button("返回经营概览") { NotificationCenter.default.post(name: .init("StudioShowOverview"), object: nil) } }
             if store.busy { ProgressView("正在连接…") }
             if let updated = store.updated { Label("连接成功 · " + updated.formatted(), systemImage: "checkmark.circle").foregroundStyle(.green) }
+            Section("同步与通知") {
+                Picker("自动同步", selection: $store.refreshMinutes) {
+                    Text("关闭").tag(0); Text("每 5 分钟").tag(5); Text("每 15 分钟").tag(15); Text("每 30 分钟").tag(30); Text("每小时").tag(60)
+                }
+                Toggle("目录库存变化通知", isOn: Binding(get: { store.noticesEnabled }, set: { enabled in
+                    if enabled { Task { await store.requestNotices() } } else { store.noticesEnabled = false }
+                }))
+                Text("通知权限：" + store.noticePermission).font(.caption).foregroundStyle(.secondary)
+                Text("仅在应用运行时同步目录，不轮询全部规格，不进行采购。").font(.caption).foregroundStyle(.secondary)
+            }
             Text("密钥仅保存在本机钥匙串。此版本不执行任何采购或扣款。").foregroundStyle(.secondary)
             if !error.isEmpty { Text(error).foregroundStyle(.red) }
             if !store.error.isEmpty { Text(store.error).foregroundStyle(.red) }
@@ -323,6 +396,6 @@ struct SettingsView: View {
     @StateObject private var store = Store()
     var body: some Scene {
         WindowGroup("AI-O Studio") { Root().environmentObject(store) }
-        Settings { SettingsView().environmentObject(store).frame(width: 480, height: 270) }
+        Settings { SettingsView().environmentObject(store).frame(width: 520, height: 480) }
     }
 }

@@ -95,6 +95,15 @@ struct Overview: View {
                         }.padding(.vertical, 5)
                     }
                 }
+                if !store.inventoryChanges.isEmpty {
+                    GroupBox("目录库存变化") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(Array(store.inventoryChanges.enumerated()), id: \.offset) { item in
+                                Label(item.element, systemImage: "tray").font(.subheadline)
+                            }
+                        }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
+                    }
+                }
                 Text("只读模式 · 供应商库存和销量不是本店资产或营业额。").font(.caption).foregroundStyle(.secondary)
             }.padding(26).frame(maxWidth: 1100, alignment: .leading)
         }

@@ -154,6 +154,20 @@ struct ProductDetail: View {
     @State private var lastQuote: Date?
     var options: [Variant] { variants(detail["config"]) }
     var matrix: [[String: Any]] { detail["level_price_compare_matrix"] as? [[String: Any]] ?? [] }
+    var hasUnsupportedSKU: Bool {
+        if let config = detail["config"] as? [String: Any] {
+            for (key, value) in config where key.lowercased().contains("sku") {
+                if let dict = value as? [String: Any], !dict.isEmpty { return true }
+                if let array = value as? [Any], !array.isEmpty { return true }
+                if let text = value as? String, !text.isEmpty { return true }
+            }
+        }
+        if let selection = detail["price_selection"] as? [String: Any] {
+            if let sku = selection["sku"] as? [String: Any], !sku.isEmpty { return true }
+            if let sku = selection["sku"] as? [Any], !sku.isEmpty { return true }
+        }
+        return false
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .top, spacing: 12) {
@@ -171,6 +185,7 @@ struct ProductDetail: View {
             VStack(alignment: .leading, spacing: 16) {
                 if !error.isEmpty { Text(error).foregroundStyle(.red) }
                 if pane == "quote" {
+                if hasUnsupportedSKU { Label("该商品包含多维 SKU，当前版本暂不支持精确查询，避免返回错误报价。", systemImage: "exclamationmark.triangle").foregroundStyle(.orange) }
                 if !options.isEmpty {
                     Picker("类别规格", selection: $race) {
                         ForEach(options) { Text($0.race + " · ¥" + $0.price).tag($0.race) }
@@ -178,8 +193,8 @@ struct ProductDetail: View {
                 }
                 Stepper("数量：\(quantity)", value: $quantity, in: 1...1000).disabled(busy)
                 HStack {
-                    Button("查询报价与库存") { Task { await lookup() } }.disabled(busy || detail.isEmpty)
-                    Button("库存可用性校验") { Task { await validate() } }.disabled(busy || detail.isEmpty)
+                    Button("查询报价与库存") { Task { await lookup() } }.disabled(busy || detail.isEmpty || hasUnsupportedSKU)
+                    Button("库存可用性校验") { Task { await validate() } }.disabled(busy || detail.isEmpty || hasUnsupportedSKU)
                     if busy { ProgressView().controlSize(.small) }
                 }
                 if !status.isEmpty { Label(status, systemImage: "info.circle").foregroundStyle(.secondary) }
@@ -193,7 +208,7 @@ struct ProductDetail: View {
                         Spacer()
                         VStack(alignment: .leading) {
                             Text("规格库存").foregroundStyle(.secondary)
-                            Text(stock.map { String($0) } ?? "—").font(.title)
+                            Text(stock.map { $0 >= 1_000_000 ? "待确认" : String($0) } ?? "—").font(.title)
                         }
                     }.padding(8)
                 }
@@ -201,7 +216,7 @@ struct ProductDetail: View {
                     VStack(alignment: .leading) {
                         TextField("单件零售价（元）", text: $retail)
                         Text("默认取对应规格的分站零售价，可手动调整。").font(.caption).foregroundStyle(.secondary)
-                        if let quote, let selling = decimalValue(retail) {
+                        if let quote, let selling = decimalValue(retail), selling >= 0 {
                             let revenue = selling * Decimal(quantity)
                             let difference = revenue - quote
                             Text("参考总毛利：¥" + NSDecimalNumber(decimal: difference).stringValue).font(.title3.weight(.semibold))
@@ -231,12 +246,13 @@ struct ProductDetail: View {
     func applyRetail() {
         let heads = detail["level_price_compare_heads"] as? [[String: Any]] ?? []
         guard let index = heads.firstIndex(where: { ($0["key"] as? String) == "station_retail" }) else { retail = ""; return }
-        let row = matrix.first { (stringValue($0["spec"]) ?? "") == "类型：" + race } ?? (matrix.count == 1 ? matrix.first : nil)
+        let row = matrix.first { (stringValue($0["spec"]) ?? "") == "类型：" + race } ?? (race.isEmpty && matrix.count == 1 ? matrix.first : nil)
         let cells = row?["cells"] as? [[String: Any]] ?? []
         retail = cells.indices.contains(index) ? (stringValue(cells[index]["price"]) ?? "") : ""
     }
     func fields() -> [String: String] { ["code": product.id, "race": race] }
     @MainActor func load() async {
+        guard !busy else { return }
         busy = true; defer { busy = false }
         error = ""; detail = [:]; quote = nil; stock = nil; status = ""; lastQuote = nil
         do {
@@ -248,7 +264,8 @@ struct ProductDetail: View {
         } catch { self.error = error.localizedDescription }
     }
     @MainActor func lookup() async {
-        busy = true; error = ""; status = ""; quote = nil; stock = nil
+        guard !busy, !hasUnsupportedSKU else { return }
+        busy = true; error = ""; status = ""; quote = nil; stock = nil; lastQuote = nil
         defer { busy = false }
         let selected = race, count = quantity, account = store.merchant
         let api = store.api
@@ -265,6 +282,7 @@ struct ProductDetail: View {
         } catch { self.error = error.localizedDescription }
     }
     @MainActor func validate() async {
+        guard !busy, !hasUnsupportedSKU else { return }
         busy = true; error = ""; status = ""
         defer { busy = false }
         do {
@@ -291,6 +309,7 @@ struct SettingsView: View {
                     Task { await store.refresh() }
                 } catch { self.error = error.localizedDescription }
             }.disabled(id.isEmpty || secret.isEmpty || store.busy)
+            if store.updated != nil { Button("返回经营概览") { NotificationCenter.default.post(name: .init("StudioShowOverview"), object: nil) } }
             if store.busy { ProgressView("正在连接…") }
             if let updated = store.updated { Label("连接成功 · " + updated.formatted(), systemImage: "checkmark.circle").foregroundStyle(.green) }
             Text("密钥仅保存在本机钥匙串。此版本不执行任何采购或扣款。").foregroundStyle(.secondary)

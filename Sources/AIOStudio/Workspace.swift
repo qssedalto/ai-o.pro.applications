@@ -253,7 +253,7 @@ struct HistoryView: View {
                             Text(sample.time.formatted()).foregroundStyle(.secondary)
                             Spacer()
                             Text("¥" + NSDecimalNumber(decimal: sample.price).stringValue).monospacedDigit()
-                            Text("库存 " + String(sample.stock)).monospacedDigit().frame(minWidth: 90, alignment: .trailing)
+                            Text(sample.stock >= 1_000_000 ? "库存待确认" : "库存 " + String(sample.stock)).monospacedDigit().frame(minWidth: 90, alignment: .trailing)
                         }
                     }
                 }
@@ -308,5 +308,6 @@ struct Root: View {
         }
         .frame(minWidth: 880, minHeight: 580)
         .task { if store.merchant.isEmpty { section = .settings } else { await store.refresh() } }
+        .onReceive(NotificationCenter.default.publisher(for: .init("StudioShowOverview"))) { _ in section = .overview }
     }
 }

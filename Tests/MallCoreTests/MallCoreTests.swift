@@ -14,6 +14,13 @@ final class MallCoreTests: XCTestCase {
         XCTAssertEqual(items.first?.stock, "4")
         XCTAssertEqual(items.first?.id, "ABC")
     }
+    func testProductPresentation() throws {
+        let data: [[String: Any]] = [["name":"分类","children":[["code":"ONE","name":"商品","stock":10,"delivery_way":0,"cover":"https://imgurloss.xqd.cn/test.png"],["code":"TWO","name":"商品2","cover":"http://example.com/a.png"]]]]
+        let items = try Product.catalog(data)
+        XCTAssertEqual(items.first?.deliveryWay, 0)
+        XCTAssertEqual(items.first?.cover?.host, "imgurloss.xqd.cn")
+        XCTAssertNil(items.last?.cover)
+    }
     func testVariants() {
         XCTAssertEqual(variants("[category]\nA=1.25\n[category_factory]\nA=1").first?.price, "1.25")
         XCTAssertEqual(variants(["category":["A":"1.25"]]).first?.race, "A")

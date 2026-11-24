@@ -99,11 +99,16 @@ public struct Product: Identifiable, Hashable {
     public let category: String
     public let price: String
     public let stock: String
+    public let cover: URL?
+    public let deliveryWay: Int?
     public init?(_ object: [String: Any], category: String) {
         guard let code = object["code"] as? String, !code.isEmpty, let name = object["name"] as? String else { return nil }
         id = code; self.name = name; self.category = category
         price = stringValue(object["user_price"]) ?? stringValue(object["price"]) ?? "—"
         stock = stringValue(object["stock"]) ?? "—"
+        let url = (object["cover"] as? String).flatMap(URL.init(string:))
+        cover = url?.scheme == "https" && url?.host == "imgurloss.xqd.cn" ? url : nil
+        deliveryWay = Int(stringValue(object["delivery_way"]) ?? "")
     }
     public static func catalog(_ data: Any) throws -> [Product] {
         guard let categories = data as? [[String: Any]] else { throw MallError.invalidResponse }
